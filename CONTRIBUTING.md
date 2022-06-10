@@ -25,7 +25,7 @@ git checkout master
 git merge --no-commit golang-http-upstream
 ```
 ```
-git remote add -f xnethttp2 https://cs.opensource.google/go/x/net
+git remote add -f xnethttp2 https://github.com/golang/net
 git checkout -b xnethttp2-upstream xnethttp2/master
 git subtree split -P http2/ -b golang-http2-upstream
 git checkout master
