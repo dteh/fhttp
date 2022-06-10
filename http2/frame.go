@@ -89,7 +89,6 @@ const (
 	// Continuation Frame
 	FlagContinuationEndHeaders Flags = 0x4
 
-	// PushPromise Frame
 	FlagPushPromiseEndHeaders Flags = 0x4
 	FlagPushPromisePadded     Flags = 0x8
 )
@@ -123,7 +122,7 @@ var flagName = map[FrameType]map[Flags]string{
 // a frameParser parses a frame given its FrameHeader and payload
 // bytes. The length of payload will always equal fh.Length (which
 // might be 0).
-type frameParser func(fc *frameCache, fh FrameHeader, payload []byte) (Frame, error)
+type frameParser func(fc *frameCache, fh FrameHeader, countError func(string), payload []byte) (Frame, error)
 
 var frameParsers = map[FrameType]frameParser{
 	FrameData:         parseDataFrame,
@@ -268,8 +267,13 @@ type Framer struct {
 	lastFrame Frame
 	errDetail error
 
+	// countError is a non-nil func that's called on a frame parse
+	// error with some unique error path token. It's initialized
+	// from Transport.CountError or Server.CountError.
+	countError func(errToken string)
+
 	// lastHeaderStream is non-zero if the last frame was an
-	// unfinished HEADERS/PUSH_PROMISE/CONTINUATION.
+	// unfinished HEADERS/CONTINUATION.
 	lastHeaderStream uint32
 
 	maxReadSize uint32
@@ -301,10 +305,9 @@ type Framer struct {
 	// It is not compatible with ReadMetaHeaders.
 	AllowIllegalReads bool
 
-	// ReadMetaHeaders if non-nil causes ReadFrame to merge:
-	// HEADERS      + CONTINUATIONs -> MetaHeadersFrame
-	// PUSH_PROMISE + CONTINUATIONs -> MetaPushPromiseFrame
-	// and return the meta frame instead.
+	// ReadMetaHeaders if non-nil causes ReadFrame to merge
+	// HEADERS and CONTINUATION frames together and return
+	// MetaHeadersFrame instead.
 	ReadMetaHeaders *hpack.Decoder
 
 	// MaxHeaderListSize is the http2 MAX_HEADER_LIST_SIZE.
@@ -428,6 +431,7 @@ func NewFramer(w io.Writer, r io.Reader) *Framer {
 	fr := &Framer{
 		w:                 w,
 		r:                 r,
+		countError:        func(string) {},
 		logReads:          logFrameReads,
 		logWrites:         logFrameWrites,
 		debugReadLoggerf:  log.Printf,
@@ -502,7 +506,7 @@ func (fr *Framer) ReadFrame() (Frame, error) {
 	if _, err := io.ReadFull(fr.r, payload); err != nil {
 		return nil, err
 	}
-	f, err := typeFrameParser(fh.Type)(fr.frameCache, fh, payload)
+	f, err := typeFrameParser(fh.Type)(fr.frameCache, fh, fr.countError, payload)
 	if err != nil {
 		if ce, ok := err.(connError); ok {
 			return nil, fr.connError(ce.Code, ce.Reason)
@@ -513,10 +517,10 @@ func (fr *Framer) ReadFrame() (Frame, error) {
 		return nil, err
 	}
 	if fr.logReads {
-		fr.debugReadLoggerf("http2: Framer %p: read %v. Type: %v", fr, summarizeFrame(f), fh.Type)
+		fr.debugReadLoggerf("http2: Framer %p: read %v", fr, summarizeFrame(f))
 	}
-	if (fh.Type == FrameHeaders || fh.Type == FramePushPromise) && fr.ReadMetaHeaders != nil {
-		return fr.readMetaFrame(f.(continuable))
+	if fh.Type == FrameHeaders && fr.ReadMetaHeaders != nil {
+		return fr.readMetaFrame(f.(*HeadersFrame))
 	}
 	return f, nil
 }
@@ -531,7 +535,7 @@ func (fr *Framer) connError(code ErrCode, reason string) error {
 }
 
 // checkFrameOrder reports an error if f is an invalid frame to return
-// next from ReadFrame. Mostly it checks whether HEADERS/PUSH_PROMISE and
+// next from ReadFrame. Mostly it checks whether HEADERS and
 // CONTINUATION frames are contiguous.
 func (fr *Framer) checkFrameOrder(f Frame) error {
 	last := fr.lastFrame
@@ -558,7 +562,7 @@ func (fr *Framer) checkFrameOrder(f Frame) error {
 	}
 
 	switch fh.Type {
-	case FrameHeaders, FramePushPromise, FrameContinuation:
+	case FrameHeaders, FrameContinuation:
 		if fh.Flags.Has(FlagHeadersEndHeaders) {
 			fr.lastHeaderStream = 0
 		} else {
@@ -590,13 +594,14 @@ func (f *DataFrame) Data() []byte {
 	return f.data
 }
 
-func parseDataFrame(fc *frameCache, fh FrameHeader, payload []byte) (Frame, error) {
+func parseDataFrame(fc *frameCache, fh FrameHeader, countError func(string), payload []byte) (Frame, error) {
 	if fh.StreamID == 0 {
 		// DATA frames MUST be associated with a stream. If a
 		// DATA frame is received whose stream identifier
 		// field is 0x0, the recipient MUST respond with a
 		// connection error (Section 5.4.1) of type
 		// PROTOCOL_ERROR.
+		countError("frame_data_stream_0")
 		return nil, connError{ErrCodeProtocol, "DATA frame with stream ID 0"}
 	}
 	f := fc.getDataFrame()
@@ -607,6 +612,7 @@ func parseDataFrame(fc *frameCache, fh FrameHeader, payload []byte) (Frame, erro
 		var err error
 		payload, padSize, err = readByte(payload)
 		if err != nil {
+			countError("frame_data_pad_byte_short")
 			return nil, err
 		}
 	}
@@ -615,6 +621,7 @@ func parseDataFrame(fc *frameCache, fh FrameHeader, payload []byte) (Frame, erro
 		// length of the frame payload, the recipient MUST
 		// treat this as a connection error.
 		// Filed: https://github.com/http2/http2-spec/issues/610
+		countError("frame_data_pad_too_big")
 		return nil, connError{ErrCodeProtocol, "pad size larger than data payload"}
 	}
 	f.data = payload[:len(payload)-int(padSize)]
@@ -697,7 +704,7 @@ type SettingsFrame struct {
 	p []byte
 }
 
-func parseSettingsFrame(_ *frameCache, fh FrameHeader, p []byte) (Frame, error) {
+func parseSettingsFrame(_ *frameCache, fh FrameHeader, countError func(string), p []byte) (Frame, error) {
 	if fh.Flags.Has(FlagSettingsAck) && fh.Length > 0 {
 		// When this (ACK 0x1) bit is set, the payload of the
 		// SETTINGS frame MUST be empty. Receipt of a
@@ -705,6 +712,7 @@ func parseSettingsFrame(_ *frameCache, fh FrameHeader, p []byte) (Frame, error) 
 		// field value other than 0 MUST be treated as a
 		// connection error (Section 5.4.1) of type
 		// FRAME_SIZE_ERROR.
+		countError("frame_settings_ack_with_length")
 		return nil, ConnectionError(ErrCodeFrameSize)
 	}
 	if fh.StreamID != 0 {
@@ -715,14 +723,17 @@ func parseSettingsFrame(_ *frameCache, fh FrameHeader, p []byte) (Frame, error) 
 		// field is anything other than 0x0, the endpoint MUST
 		// respond with a connection error (Section 5.4.1) of
 		// type PROTOCOL_ERROR.
+		countError("frame_settings_has_stream")
 		return nil, ConnectionError(ErrCodeProtocol)
 	}
 	if len(p)%6 != 0 {
+		countError("frame_settings_mod_6")
 		// Expecting even number of 6 byte settings.
 		return nil, ConnectionError(ErrCodeFrameSize)
 	}
 	f := &SettingsFrame{FrameHeader: fh, p: p}
 	if v, ok := f.Value(SettingInitialWindowSize); ok && v > (1<<31)-1 {
+		countError("frame_settings_window_size_too_big")
 		// Values above the maximum flow control window size of 2^31 - 1 MUST
 		// be treated as a connection error (Section 5.4.1) of type
 		// FLOW_CONTROL_ERROR.
@@ -834,11 +845,13 @@ type PingFrame struct {
 
 func (f *PingFrame) IsAck() bool { return f.Flags.Has(FlagPingAck) }
 
-func parsePingFrame(_ *frameCache, fh FrameHeader, payload []byte) (Frame, error) {
+func parsePingFrame(_ *frameCache, fh FrameHeader, countError func(string), payload []byte) (Frame, error) {
 	if len(payload) != 8 {
+		countError("frame_ping_length")
 		return nil, ConnectionError(ErrCodeFrameSize)
 	}
 	if fh.StreamID != 0 {
+		countError("frame_ping_has_stream")
 		return nil, ConnectionError(ErrCodeProtocol)
 	}
 	f := &PingFrame{FrameHeader: fh}
@@ -874,11 +887,13 @@ func (f *GoAwayFrame) DebugData() []byte {
 	return f.debugData
 }
 
-func parseGoAwayFrame(_ *frameCache, fh FrameHeader, p []byte) (Frame, error) {
+func parseGoAwayFrame(_ *frameCache, fh FrameHeader, countError func(string), p []byte) (Frame, error) {
 	if fh.StreamID != 0 {
+		countError("frame_goaway_has_stream")
 		return nil, ConnectionError(ErrCodeProtocol)
 	}
 	if len(p) < 8 {
+		countError("frame_goaway_short")
 		return nil, ConnectionError(ErrCodeFrameSize)
 	}
 	return &GoAwayFrame{
@@ -914,7 +929,7 @@ func (f *UnknownFrame) Payload() []byte {
 	return f.p
 }
 
-func parseUnknownFrame(_ *frameCache, fh FrameHeader, p []byte) (Frame, error) {
+func parseUnknownFrame(_ *frameCache, fh FrameHeader, countError func(string), p []byte) (Frame, error) {
 	return &UnknownFrame{fh, p}, nil
 }
 
@@ -925,8 +940,9 @@ type WindowUpdateFrame struct {
 	Increment uint32 // never read with high bit set
 }
 
-func parseWindowUpdateFrame(_ *frameCache, fh FrameHeader, p []byte) (Frame, error) {
+func parseWindowUpdateFrame(_ *frameCache, fh FrameHeader, countError func(string), p []byte) (Frame, error) {
 	if len(p) != 4 {
+		countError("frame_windowupdate_bad_len")
 		return nil, ConnectionError(ErrCodeFrameSize)
 	}
 	inc := binary.BigEndian.Uint32(p[:4]) & 0x7fffffff // mask off high reserved bit
@@ -938,8 +954,10 @@ func parseWindowUpdateFrame(_ *frameCache, fh FrameHeader, p []byte) (Frame, err
 		// control window MUST be treated as a connection
 		// error (Section 5.4.1).
 		if fh.StreamID == 0 {
+			countError("frame_windowupdate_zero_inc_conn")
 			return nil, ConnectionError(ErrCodeProtocol)
 		}
+		countError("frame_windowupdate_zero_inc_stream")
 		return nil, streamError(fh.StreamID, ErrCodeProtocol)
 	}
 	return &WindowUpdateFrame{
@@ -978,10 +996,6 @@ func (f *HeadersFrame) HeaderBlockFragment() []byte {
 	return f.headerFragBuf
 }
 
-func (f *HeadersFrame) clearHeaderBlockFragment() {
-	f.headerFragBuf = nil
-}
-
 func (f *HeadersFrame) HeadersEnded() bool {
 	return f.FrameHeader.Flags.Has(FlagHeadersEndHeaders)
 }
@@ -994,7 +1008,7 @@ func (f *HeadersFrame) HasPriority() bool {
 	return f.FrameHeader.Flags.Has(FlagHeadersPriority)
 }
 
-func parseHeadersFrame(_ *frameCache, fh FrameHeader, p []byte) (_ Frame, err error) {
+func parseHeadersFrame(_ *frameCache, fh FrameHeader, countError func(string), p []byte) (_ Frame, err error) {
 	hf := &HeadersFrame{
 		FrameHeader: fh,
 	}
@@ -1003,11 +1017,13 @@ func parseHeadersFrame(_ *frameCache, fh FrameHeader, p []byte) (_ Frame, err er
 		// is received whose stream identifier field is 0x0, the recipient MUST
 		// respond with a connection error (Section 5.4.1) of type
 		// PROTOCOL_ERROR.
+		countError("frame_headers_zero_stream")
 		return nil, connError{ErrCodeProtocol, "HEADERS frame with stream ID 0"}
 	}
 	var padLength uint8
 	if fh.Flags.Has(FlagHeadersPadded) {
 		if p, padLength, err = readByte(p); err != nil {
+			countError("frame_headers_pad_short")
 			return
 		}
 	}
@@ -1015,16 +1031,19 @@ func parseHeadersFrame(_ *frameCache, fh FrameHeader, p []byte) (_ Frame, err er
 		var v uint32
 		p, v, err = readUint32(p)
 		if err != nil {
+			countError("frame_headers_prio_short")
 			return nil, err
 		}
 		hf.Priority.StreamDep = v & 0x7fffffff
 		hf.Priority.Exclusive = (v != hf.Priority.StreamDep) // high bit was set
 		p, hf.Priority.Weight, err = readByte(p)
 		if err != nil {
+			countError("frame_headers_prio_weight_short")
 			return nil, err
 		}
 	}
-	if len(p)-int(padLength) <= 0 {
+	if len(p)-int(padLength) < 0 {
+		countError("frame_headers_pad_too_big")
 		return nil, streamError(fh.StreamID, ErrCodeProtocol)
 	}
 	hf.headerFragBuf = p[:len(p)-int(padLength)]
@@ -1131,11 +1150,13 @@ func (p PriorityParam) IsZero() bool {
 	return p == PriorityParam{}
 }
 
-func parsePriorityFrame(_ *frameCache, fh FrameHeader, payload []byte) (Frame, error) {
+func parsePriorityFrame(_ *frameCache, fh FrameHeader, countError func(string), payload []byte) (Frame, error) {
 	if fh.StreamID == 0 {
+		countError("frame_priority_zero_stream")
 		return nil, connError{ErrCodeProtocol, "PRIORITY frame with stream ID 0"}
 	}
 	if len(payload) != 5 {
+		countError("frame_priority_bad_length")
 		return nil, connError{ErrCodeFrameSize, fmt.Sprintf("PRIORITY frame payload size was %d; want 5", len(payload))}
 	}
 	v := binary.BigEndian.Uint32(payload[:4])
@@ -1178,11 +1199,13 @@ type RSTStreamFrame struct {
 	ErrCode ErrCode
 }
 
-func parseRSTStreamFrame(_ *frameCache, fh FrameHeader, p []byte) (Frame, error) {
+func parseRSTStreamFrame(_ *frameCache, fh FrameHeader, countError func(string), p []byte) (Frame, error) {
 	if len(p) != 4 {
+		countError("frame_rststream_bad_len")
 		return nil, ConnectionError(ErrCodeFrameSize)
 	}
 	if fh.StreamID == 0 {
+		countError("frame_rststream_zero_stream")
 		return nil, ConnectionError(ErrCodeProtocol)
 	}
 	return &RSTStreamFrame{fh, ErrCode(binary.BigEndian.Uint32(p[:4]))}, nil
@@ -1208,8 +1231,9 @@ type ContinuationFrame struct {
 	headerFragBuf []byte
 }
 
-func parseContinuationFrame(_ *frameCache, fh FrameHeader, p []byte) (Frame, error) {
+func parseContinuationFrame(_ *frameCache, fh FrameHeader, countError func(string), p []byte) (Frame, error) {
 	if fh.StreamID == 0 {
+		countError("frame_continuation_zero_stream")
 		return nil, connError{ErrCodeProtocol, "CONTINUATION frame with stream ID 0"}
 	}
 	return &ContinuationFrame{fh, p}, nil
@@ -1218,10 +1242,6 @@ func parseContinuationFrame(_ *frameCache, fh FrameHeader, p []byte) (Frame, err
 func (f *ContinuationFrame) HeaderBlockFragment() []byte {
 	f.checkValid()
 	return f.headerFragBuf
-}
-
-func (f *ContinuationFrame) clearHeaderBlockFragment() {
-	f.headerFragBuf = nil
 }
 
 func (f *ContinuationFrame) HeadersEnded() bool {
@@ -1258,15 +1278,11 @@ func (f *PushPromiseFrame) HeaderBlockFragment() []byte {
 	return f.headerFragBuf
 }
 
-func (f *PushPromiseFrame) clearHeaderBlockFragment() {
-	f.headerFragBuf = nil
-}
-
 func (f *PushPromiseFrame) HeadersEnded() bool {
 	return f.FrameHeader.Flags.Has(FlagPushPromiseEndHeaders)
 }
 
-func parsePushPromise(_ *frameCache, fh FrameHeader, p []byte) (_ Frame, err error) {
+func parsePushPromise(_ *frameCache, fh FrameHeader, countError func(string), p []byte) (_ Frame, err error) {
 	pp := &PushPromiseFrame{
 		FrameHeader: fh,
 	}
@@ -1277,25 +1293,29 @@ func parsePushPromise(_ *frameCache, fh FrameHeader, p []byte) (_ Frame, err err
 		// with. If the stream identifier field specifies the value
 		// 0x0, a recipient MUST respond with a connection error
 		// (Section 5.4.1) of type PROTOCOL_ERROR.
-		return nil, connError{ErrCodeProtocol, "PUSH_PROMISE frame with stream ID 0"}
+		countError("frame_pushpromise_zero_stream")
+		return nil, ConnectionError(ErrCodeProtocol)
 	}
 	// The PUSH_PROMISE frame includes optional padding.
 	// Padding fields and flags are identical to those defined for DATA frames
 	var padLength uint8
 	if fh.Flags.Has(FlagPushPromisePadded) {
 		if p, padLength, err = readByte(p); err != nil {
+			countError("frame_pushpromise_pad_short")
 			return
 		}
 	}
 
 	p, pp.PromiseID, err = readUint32(p)
 	if err != nil {
+		countError("frame_pushpromise_promiseid_short")
 		return
 	}
 	pp.PromiseID = pp.PromiseID & (1<<31 - 1)
 
 	if int(padLength) > len(p) {
 		// like the DATA frame, error out if padding is longer than the body.
+		countError("frame_pushpromise_pad_too_big")
 		return nil, ConnectionError(ErrCodeProtocol)
 	}
 	pp.headerFragBuf = p[:len(p)-int(padLength)]
@@ -1385,54 +1405,9 @@ type headersEnder interface {
 	HeadersEnded() bool
 }
 
-type continuable interface {
-	Frame
+type headersOrContinuation interface {
 	headersEnder
 	HeaderBlockFragment() []byte
-	clearHeaderBlockFragment()
-}
-
-type metaFrame struct {
-	Fields    []hpack.HeaderField
-	Truncated bool
-}
-
-// pseudoFields returns the pseudo header fields of mf.
-// The caller does not own the returned slice.
-func (mf *metaFrame) pseudoFields() []hpack.HeaderField {
-	for i, hf := range mf.Fields {
-		if !hf.IsPseudo() {
-			return mf.Fields[:i]
-		}
-	}
-	return mf.Fields
-}
-
-func (mf *metaFrame) checkPseudos() error {
-	var isRequest, isResponse bool
-	pf := mf.pseudoFields()
-	for i, hf := range pf {
-		switch hf.Name {
-		case ":method", ":path", ":scheme", ":authority":
-			isRequest = true
-		case ":status":
-			isResponse = true
-		default:
-			return pseudoHeaderError(hf.Name)
-		}
-		// Check for duplicates.
-		// This would be a bad algorithm, but N is 4.
-		// And this doesn't allocate.
-		for _, hf2 := range pf[:i] {
-			if hf.Name == hf2.Name {
-				return duplicatePseudoHeaderError(hf.Name)
-			}
-		}
-	}
-	if isRequest && isResponse {
-		return errMixPseudoHeaderTypes
-	}
-	return nil
 }
 
 // A MetaHeadersFrame is the representation of one HEADERS frame and
@@ -1453,7 +1428,7 @@ type MetaHeadersFrame struct {
 	// not have unknown pseudo header fields or invalid header
 	// field names or values. Required pseudo header fields may be
 	// missing, however. Use the MetaHeadersFrame.Pseudo accessor
-	// method to access pseudo headers.
+	// method access pseudo headers.
 	Fields []hpack.HeaderField
 
 	// Truncated is whether the max header list size limit was hit
@@ -1498,65 +1473,31 @@ func (mh *MetaHeadersFrame) PseudoFields() []hpack.HeaderField {
 	return mh.Fields
 }
 
-// A MetaPushPromiseFrame is the representation of one PUSH_PROMISE frame and
-// zero or more contiguous CONTINUATION frames and the decoding of
-// their HPACK-encoded contents.
-//
-// This type of frame does not appear on the wire and is only returned
-// by the Framer when Framer.ReadMetaHeaders is set.
-type MetaPushPromiseFrame struct {
-	*PushPromiseFrame
-	// Fields are the fields contained in the PUSH_PROMISE and
-	// CONTINUATION frames. The underlying slice is owned by the
-	// Framer and must not be retained after the next call to
-	// ReadFrame.
-	//
-	// Fields are guaranteed to be in the correct http2 order and
-	// not have unknown pseudo header fields or invalid header
-	// field names or values. Required pseudo header fields may be
-	// missing, however. Use the MetaPushPromiseFrame.Pseudo accessor
-	// method to access pseudo headers.
-	Fields []hpack.HeaderField
-	// Truncated is whether the max header list size limit was hit
-	// and Fields is incomplete. The hpack decoder state is still
-	// valid, however.
-	Truncated bool
-}
-
-// PseudoValue returns the given pseudo header field's value.
-// The provided pseudo field should not contain the leading colon.
-func (mp *MetaPushPromiseFrame) PseudoValue(pseudo string) string {
-	for _, hf := range mp.Fields {
-		if !hf.IsPseudo() {
-			return ""
+func (mh *MetaHeadersFrame) checkPseudos() error {
+	var isRequest, isResponse bool
+	pf := mh.PseudoFields()
+	for i, hf := range pf {
+		switch hf.Name {
+		case ":method", ":path", ":scheme", ":authority":
+			isRequest = true
+		case ":status":
+			isResponse = true
+		default:
+			return pseudoHeaderError(hf.Name)
 		}
-		if hf.Name[1:] == pseudo {
-			return hf.Value
+		// Check for duplicates.
+		// This would be a bad algorithm, but N is 4.
+		// And this doesn't allocate.
+		for _, hf2 := range pf[:i] {
+			if hf.Name == hf2.Name {
+				return duplicatePseudoHeaderError(hf.Name)
+			}
 		}
 	}
-	return ""
-}
-
-// RegularFields returns the regular (non-pseudo) header fields of mp.
-// The caller does not own the returned slice.
-func (mp *MetaPushPromiseFrame) RegularFields() []hpack.HeaderField {
-	for i, hf := range mp.Fields {
-		if !hf.IsPseudo() {
-			return mp.Fields[i:]
-		}
+	if isRequest && isResponse {
+		return errMixPseudoHeaderTypes
 	}
 	return nil
-}
-
-// PseudoFields returns the pseudo header fields of mp.
-// The caller does not own the returned slice.
-func (mp *MetaPushPromiseFrame) PseudoFields() []hpack.HeaderField {
-	for i, hf := range mp.Fields {
-		if !hf.IsPseudo() {
-			return mp.Fields[:i]
-		}
-	}
-	return mp.Fields
 }
 
 func (fr *Framer) maxHeaderStringLen() int {
@@ -1570,13 +1511,15 @@ func (fr *Framer) maxHeaderStringLen() int {
 }
 
 // readMetaFrame returns 0 or more CONTINUATION frames from fr and
-// merges them into a Frame with the decoded hpack values.
-func (fr *Framer) readMetaFrame(cont continuable) (Frame, error) {
+// merge them into the provided hf and returns a MetaHeadersFrame
+// with the decoded hpack values.
+func (fr *Framer) readMetaFrame(hf *HeadersFrame) (*MetaHeadersFrame, error) {
 	if fr.AllowIllegalReads {
-		return nil, errors.New("illegal use of AllowIllegalReads")
+		return nil, errors.New("illegal use of AllowIllegalReads with ReadMetaHeaders")
 	}
-	mf := &metaFrame{}
-
+	mh := &MetaHeadersFrame{
+		HeadersFrame: hf,
+	}
 	var remainSize = fr.maxHeaderListSize()
 	var sawRegular bool
 
@@ -1589,7 +1532,8 @@ func (fr *Framer) readMetaFrame(cont continuable) (Frame, error) {
 			fr.debugReadLoggerf("http2: decoded hpack field %+v", hf)
 		}
 		if !httpguts.ValidHeaderFieldValue(hf.Value) {
-			invalid = headerFieldValueError(hf.Value)
+			// Don't include the value in the error, because it may be sensitive.
+			invalid = headerFieldValueError(hf.Name)
 		}
 		isPseudo := strings.HasPrefix(hf.Name, ":")
 		if isPseudo {
@@ -1611,16 +1555,17 @@ func (fr *Framer) readMetaFrame(cont continuable) (Frame, error) {
 		size := hf.Size()
 		if size > remainSize {
 			hdec.SetEmitEnabled(false)
-			mf.Truncated = true
+			mh.Truncated = true
 			return
 		}
 		remainSize -= size
 
-		mf.Fields = append(mf.Fields, hf)
+		mh.Fields = append(mh.Fields, hf)
 	})
-	// Lose reference to metaFrame:
+	// Lose reference to MetaHeadersFrame:
 	defer hdec.SetEmitFunc(func(hf hpack.HeaderField) {})
-	var hc = cont
+
+	var hc headersOrContinuation = hf
 	for {
 		frag := hc.HeaderBlockFragment()
 		if _, err := hdec.Write(frag); err != nil {
@@ -1637,8 +1582,8 @@ func (fr *Framer) readMetaFrame(cont continuable) (Frame, error) {
 		}
 	}
 
-	cont.clearHeaderBlockFragment()
-	cont.invalidate()
+	mh.HeadersFrame.headerFragBuf = nil
+	mh.HeadersFrame.invalidate()
 
 	if err := hdec.Close(); err != nil {
 		return nil, ConnectionError(ErrCodeCompression)
@@ -1648,26 +1593,16 @@ func (fr *Framer) readMetaFrame(cont continuable) (Frame, error) {
 		if VerboseLogs {
 			log.Printf("http2: invalid header: %v", invalid)
 		}
-		return nil, StreamError{cont.Header().StreamID, ErrCodeProtocol, invalid}
+		return nil, StreamError{mh.StreamID, ErrCodeProtocol, invalid}
 	}
-	if err := mf.checkPseudos(); err != nil {
+	if err := mh.checkPseudos(); err != nil {
 		fr.errDetail = err
 		if VerboseLogs {
 			log.Printf("http2: invalid pseudo headers: %v", err)
 		}
-		return nil, StreamError{cont.Header().StreamID, ErrCodeProtocol, err}
+		return nil, StreamError{mh.StreamID, ErrCodeProtocol, err}
 	}
-
-	var f Frame
-	switch orig := cont.(type) {
-	case *HeadersFrame:
-		f = &MetaHeadersFrame{HeadersFrame: orig, Fields: mf.Fields, Truncated: mf.Truncated}
-	case *PushPromiseFrame:
-		f = &MetaPushPromiseFrame{PushPromiseFrame: orig, Fields: mf.Fields, Truncated: mf.Truncated}
-	default:
-		panic("frame type not supported as meta frame")
-	}
-	return f, nil
+	return mh, nil
 }
 
 func summarizeFrame(f Frame) string {
@@ -1709,9 +1644,6 @@ func summarizeFrame(f Frame) string {
 			f.LastStreamID, f.ErrCode, f.debugData)
 	case *RSTStreamFrame:
 		fmt.Fprintf(&buf, " ErrCode=%v", f.ErrCode)
-	case *MetaPushPromiseFrame:
-		fmt.Fprintf(&buf, " PromiseID=%v", f.PromiseID)
 	}
-
 	return buf.String()
 }

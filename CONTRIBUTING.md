@@ -22,12 +22,20 @@ git remote add -f golang git@github.com:golang/go.git
 git checkout -b golang-upstream golang/master
 git subtree split -P src/net/http/ -b golang-http-upstream
 git checkout master
-git merge --no-commit golang-http-upstream
+git merge --no-commit golang-http-upstream --allow-unrelated-histories
 ```
+then resolve conflicts
+
 ```
 git remote add -f xnethttp2 https://github.com/golang/net
 git checkout -b xnethttp2-upstream xnethttp2/master
 git subtree split -P http2/ -b golang-http2-upstream
+git checkout golang-http2-upstream
+mkdir http2
+mv * http2
+git add -A
+git commit -m "moved to subdir for merge"
 git checkout master
-git merge --no-commit golang-http2-upstream
+git merge --no-commit golang-http2-upstream --allow-unrelated-histories
 ```
+then resolve conflicts

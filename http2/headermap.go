@@ -5,7 +5,6 @@
 package http2
 
 import (
-	"strings"
 	"sync"
 
 	http "github.com/dteh/fhttp"
@@ -80,10 +79,10 @@ func buildCommonHeaderMaps() {
 	}
 }
 
-func lowerHeader(v string) string {
+func lowerHeader(v string) (lower string, ascii bool) {
 	buildCommonHeaderMapsOnce()
 	if s, ok := commonLowerHeader[v]; ok {
-		return s
+		return s, true
 	}
-	return strings.ToLower(v)
+	return asciiToLower(v)
 }
