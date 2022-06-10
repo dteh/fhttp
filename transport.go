@@ -20,7 +20,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"internal/godebug"
 	"io"
 	"log"
 	"net"
@@ -32,7 +31,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/andybalholm/brotli"
+	"github.com/dteh/fhttp/internal/godebug"
+
+	cbrotli "github.com/google/brotli/go/cbrotli"
 
 	"github.com/dteh/fhttp/httptrace"
 
@@ -2299,7 +2300,7 @@ func (gz *gzipReader) Close() error {
 type brReader struct {
 	_    incomparable
 	body io.ReadCloser
-	zr   *brotli.Reader
+	zr   *cbrotli.Reader
 	zerr error
 }
 
@@ -2308,7 +2309,7 @@ func (br *brReader) Read(p []byte) (n int, err error) {
 		return 0, br.zerr
 	}
 	if br.zr == nil {
-		br.zr = brotli.NewReader(br.body)
+		br.zr = cbrotli.NewReader(br.body)
 	}
 	return br.zr.Read(p)
 }
