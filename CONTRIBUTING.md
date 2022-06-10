@@ -20,7 +20,14 @@ When changes are made by the golang team on the [http]() or [http2](https://pkg.
 ```
 git remote add -f golang git@github.com:golang/go.git
 git checkout -b golang-upstream golang/master
-git subtree split -P src/crypto/tls/ -b golang-tls-upstream
+git subtree split -P src/net/http/ -b golang-http-upstream
 git checkout master
-git merge --no-commit golang-<http or http2>-upstream
+git merge --no-commit golang-http-upstream
+```
+```
+git remote add -f xnethttp2 https://cs.opensource.google/go/x/net
+git checkout -b xnethttp2-upstream xnethttp2/master
+git subtree split -P http2/ -b golang-http2-upstream
+git checkout master
+git merge --no-commit golang-http2-upstream
 ```
