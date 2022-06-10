@@ -194,7 +194,7 @@ func TestEnablePush(t *testing.T) {
 	if err != nil {
 		t.Fatalf(err.Error())
 	}
-	t2.PushHandler = &http2.DefaultPushHandler{}
+	// t2.PushHandler = &http2.DefaultPushHandler{}
 	t1.H2transport = t2
 	c := &http.Client{
 		Transport: t1,
@@ -242,7 +242,7 @@ func TestFinishLine(t *testing.T) {
 	}
 	t2.InitialWindowSize = 6291456
 	t2.HeaderTableSize = 65536
-	t2.PushHandler = &http2.DefaultPushHandler{}
+	// t2.PushHandler = &http2.DefaultPushHandler{}
 	t1.H2transport = t2
 
 	c := &http.Client{
