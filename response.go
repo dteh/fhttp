@@ -39,12 +39,12 @@ type Response struct {
 	ProtoMajor int    // e.g. 1
 	ProtoMinor int    // e.g. 0
 
-	// Header maps header keys to Values. If the response had multiple
-	// headers with the same Key, they may be concatenated, with comma
+	// Header maps header keys to values. If the response had multiple
+	// headers with the same key, they may be concatenated, with comma
 	// delimiters.  (RFC 7230, section 3.2.2 requires that multiple headers
 	// be semantically equivalent to a comma-delimited sequence.) When
-	// Header Values are duplicated by other fields in this struct (e.g.,
-	// ContentLength, TransferEncoding, Trailer), the field Values are
+	// Header values are duplicated by other fields in this struct (e.g.,
+	// ContentLength, TransferEncoding, Trailer), the field values are
 	// authoritative.
 	//
 	// Keys in the map are canonicalized (see CanonicalHeaderKey).
@@ -73,7 +73,7 @@ type Response struct {
 
 	// ContentLength records the length of the associated content. The
 	// value -1 indicates that the length is unknown. Unless Request.Method
-	// is "HEAD", Values >= 0 indicate that the given number of bytes may
+	// is "HEAD", values >= 0 indicate that the given number of bytes may
 	// be read from Body.
 	ContentLength int64
 
@@ -95,18 +95,18 @@ type Response struct {
 	// the server, set Transport.DisableCompression to true.
 	Uncompressed bool
 
-	// Trailer maps trailer keys to Values in the same
+	// Trailer maps trailer keys to values in the same
 	// format as Header.
 	//
-	// The Trailer initially contains only nil Values, one for
-	// each Key specified in the server's "Trailer" header
-	// value. Those Values are not added to Header.
+	// The Trailer initially contains only nil values, one for
+	// each key specified in the server's "Trailer" header
+	// value. Those values are not added to Header.
 	//
 	// Trailer must not be accessed concurrently with Read calls
 	// on the Body.
 	//
 	// After Body.Read has returned io.EOF, Trailer will contain
-	// any trailer Values sent by the server.
+	// any trailer values sent by the server.
 	Trailer Header
 
 	// Request is the request that was sent to obtain this Response.
@@ -149,7 +149,7 @@ func (r *Response) Location() (*url.URL, error) {
 // The req parameter optionally specifies the Request that corresponds
 // to this Response. If nil, a GET request is assumed.
 // Clients must call resp.Body.Close when finished reading resp.Body.
-// After that call, clients can inspect resp.Trailer to find Key/value
+// After that call, clients can inspect resp.Trailer to find key/value
 // pairs included in the response trailer.
 func ReadResponse(r *bufio.Reader, req *Request) (*Response, error) {
 	tp := textproto.NewReader(r)
@@ -165,16 +165,14 @@ func ReadResponse(r *bufio.Reader, req *Request) (*Response, error) {
 		}
 		return nil, err
 	}
-	if i := strings.IndexByte(line, ' '); i == -1 {
+	proto, status, ok := strings.Cut(line, " ")
+	if !ok {
 		return nil, badStringError("malformed HTTP response", line)
-	} else {
-		resp.Proto = line[:i]
-		resp.Status = strings.TrimLeft(line[i+1:], " ")
 	}
-	statusCode := resp.Status
-	if i := strings.IndexByte(resp.Status, ' '); i != -1 {
-		statusCode = resp.Status[:i]
-	}
+	resp.Proto = proto
+	resp.Status = strings.TrimLeft(status, " ")
+
+	statusCode, _, _ := strings.Cut(resp.Status, " ")
 	if len(statusCode) != 3 {
 		return nil, badStringError("malformed HTTP status code", statusCode)
 	}
@@ -182,7 +180,6 @@ func ReadResponse(r *bufio.Reader, req *Request) (*Response, error) {
 	if err != nil || resp.StatusCode < 0 {
 		return nil, badStringError("malformed HTTP status code", statusCode)
 	}
-	var ok bool
 	if resp.ProtoMajor, resp.ProtoMinor, ok = ParseHTTPVersion(resp.Proto); !ok {
 		return nil, badStringError("malformed HTTP version", resp.Proto)
 	}
@@ -208,8 +205,11 @@ func ReadResponse(r *bufio.Reader, req *Request) (*Response, error) {
 }
 
 // RFC 7234, section 5.4: Should treat
+//
 //	Pragma: no-cache
+//
 // like
+//
 //	Cache-Control: no-cache
 func fixPragmaCacheControl(header Header) {
 	if hp, ok := header["Pragma"]; ok && len(hp) > 0 && hp[0] == "no-cache" {
@@ -231,24 +231,23 @@ func (r *Response) ProtoAtLeast(major, minor int) bool {
 //
 // This method consults the following fields of the response r:
 //
-//  StatusCode
-//  ProtoMajor
-//  ProtoMinor
-//  Request.Method
-//  TransferEncoding
-//  Trailer
-//  Body
-//  ContentLength
-//  Header, Values for non-canonical keys will have unpredictable behavior
+//	StatusCode
+//	ProtoMajor
+//	ProtoMinor
+//	Request.Method
+//	TransferEncoding
+//	Trailer
+//	Body
+//	ContentLength
+//	Header, values for non-canonical keys will have unpredictable behavior
 //
 // The Response Body is closed after it is sent.
 func (r *Response) Write(w io.Writer) error {
 	// Status line
 	text := r.Status
 	if text == "" {
-		var ok bool
-		text, ok = statusText[r.StatusCode]
-		if !ok {
+		text = StatusText(r.StatusCode)
+		if text == "" {
 			text = "status code " + strconv.Itoa(r.StatusCode)
 		}
 	} else {

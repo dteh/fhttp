@@ -81,7 +81,7 @@ var writeSetCookiesTests = []struct {
 		&Cookie{Name: "cookie-15", Value: "samesite-none", SameSite: SameSiteNoneMode},
 		"cookie-15=samesite-none; SameSite=None",
 	},
-	// The "special" cookies have Values containing commas or spaces which
+	// The "special" cookies have values containing commas or spaces which
 	// are disallowed by RFC 6265 but are common in the wild.
 	{
 		&Cookie{Name: "special-1", Value: "a z"},
@@ -319,7 +319,7 @@ var readSetCookiesTests = []struct {
 		}},
 	},
 	// Make sure we can properly read back the Set-Cookie headers we create
-	// for Values containing spaces or commas:
+	// for values containing spaces or commas:
 	{
 		Header{"Set-Cookie": {`special-1=a z`}},
 		[]*Cookie{{Name: "special-1", Value: "a z", Raw: `special-1=a z`}},
@@ -355,13 +355,13 @@ var readSetCookiesTests = []struct {
 	{
 		Header{"Set-Cookie": {`auth={"access_token":"token1","token_type":"bearer","expires_in":604799,"scope":"store","role":"PUBLIC","roles":["PUBLIC"]}; path=/; SameSite=Strict; HttpOnly; Secure`}},
 		[]*Cookie{{
-			Name: "auth",
-			Value: `{"access_token":"token1","token_type":"bearer","expires_in":604799,"scope":"store","role":"PUBLIC","roles":["PUBLIC"]}`,
-			Path: "/",
+			Name:     "auth",
+			Value:    `{"access_token":"token1","token_type":"bearer","expires_in":604799,"scope":"store","role":"PUBLIC","roles":["PUBLIC"]}`,
+			Path:     "/",
 			SameSite: SameSiteStrictMode,
 			HttpOnly: true,
-			Secure: true,
-			Raw: `auth={"access_token":"token1","token_type":"bearer","expires_in":604799,"scope":"store","role":"PUBLIC","roles":["PUBLIC"]}; path=/; SameSite=Strict; HttpOnly; Secure`,
+			Secure:   true,
+			Raw:      `auth={"access_token":"token1","token_type":"bearer","expires_in":604799,"scope":"store","role":"PUBLIC","roles":["PUBLIC"]}; path=/; SameSite=Strict; HttpOnly; Secure`,
 		}},
 	},
 
@@ -372,7 +372,7 @@ var readSetCookiesTests = []struct {
 	// Header{"Set-Cookie": {"ASP.NET_SessionId=foo; path=/; HttpOnly, .ASPXAUTH=7E3AA; expires=Wed, 07-Mar-2012 14:25:06 GMT; path=/; HttpOnly"}},
 }
 
-func toJSON(v interface{}) string {
+func toJSON(v any) string {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Sprintf("%#v", v)
@@ -538,6 +538,31 @@ func TestCookieSanitizePath(t *testing.T) {
 
 	if got, sub := logbuf.String(), "dropping invalid bytes"; !strings.Contains(got, sub) {
 		t.Errorf("Expected substring %q in log output. Got:\n%s", sub, got)
+	}
+}
+
+func TestCookieValid(t *testing.T) {
+	tests := []struct {
+		cookie *Cookie
+		valid  bool
+	}{
+		{nil, false},
+		{&Cookie{Name: ""}, false},
+		{&Cookie{Name: "invalid-expires"}, false},
+		{&Cookie{Name: "invalid-value", Value: "foo\"bar"}, false},
+		{&Cookie{Name: "invalid-path", Path: "/foo;bar/"}, false},
+		{&Cookie{Name: "invalid-domain", Domain: "example.com:80"}, false},
+		{&Cookie{Name: "valid", Value: "foo", Path: "/bar", Domain: "example.com", Expires: time.Unix(0, 0)}, true},
+	}
+
+	for _, tt := range tests {
+		err := tt.cookie.Valid()
+		if err != nil && tt.valid {
+			t.Errorf("%#v.Valid() returned error %v; want nil", tt.cookie, err)
+		}
+		if err == nil && !tt.valid {
+			t.Errorf("%#v.Valid() returned nil; want error", tt.cookie)
+		}
 	}
 }
 

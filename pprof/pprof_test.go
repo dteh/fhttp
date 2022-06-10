@@ -16,9 +16,10 @@ import (
 	"testing"
 	"time"
 
-	http "github.com/useflyent/fhttp"
-	"github.com/useflyent/fhttp/httptest"
-	"github.com/useflyent/fhttp/internal/profile"
+	http "github.com/dteh/fhttp"
+	"github.com/dteh/fhttp/httptest"
+	"github.com/dteh/fhttp/internal/profile"
+	"github.com/dteh/fhttp/internal/testenv"
 )
 
 // TestDescriptions checks that the profile names under runtime/pprof package
@@ -153,6 +154,10 @@ func mutexHog(duration time.Duration, hogger func(mu1, mu2 *sync.Mutex, start ti
 }
 
 func TestDeltaProfile(t *testing.T) {
+	if strings.HasPrefix(runtime.GOARCH, "arm") {
+		testenv.SkipFlaky(t, 50218)
+	}
+
 	rate := runtime.SetMutexProfileFraction(1)
 	defer func() {
 		runtime.SetMutexProfileFraction(rate)

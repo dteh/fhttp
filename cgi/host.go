@@ -91,10 +91,11 @@ func (h *Handler) stderr() io.Writer {
 
 // removeLeadingDuplicates remove leading duplicate in environments.
 // It's possible to override environment like following.
-//    cgi.Handler{
-//      ...
-//      Env: []string{"SCRIPT_FILENAME=foo.php"},
-//    }
+//
+//	cgi.Handler{
+//	  ...
+//	  Env: []string{"SCRIPT_FILENAME=foo.php"},
+//	}
 func removeLeadingDuplicates(env []string) (ret []string) {
 	for i, e := range env {
 		found := false
@@ -274,12 +275,11 @@ func (h *Handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			break
 		}
 		headerLines++
-		parts := strings.SplitN(string(line), ":", 2)
-		if len(parts) < 2 {
+		header, val, ok := strings.Cut(string(line), ":")
+		if !ok {
 			h.printf("cgi: bogus header line: %s", string(line))
 			continue
 		}
-		header, val := parts[0], parts[1]
 		if !httpguts.ValidHeaderFieldName(header) {
 			h.printf("cgi: invalid header name: %q", header)
 			continue
@@ -352,7 +352,7 @@ func (h *Handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func (h *Handler) printf(format string, v ...interface{}) {
+func (h *Handler) printf(format string, v ...any) {
 	if h.Logger != nil {
 		h.Logger.Printf(format, v...)
 	} else {

@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	http "github.com/useflyent/fhttp"
+	http "github.com/dteh/fhttp"
 )
 
 type eofReader struct{}
@@ -32,7 +32,7 @@ type dumpTest struct {
 	Req    *http.Request
 	GetReq func() *http.Request
 
-	Body interface{} // optional []byte or func() io.ReadCloser to populate Req.Body
+	Body any // optional []byte or func() io.ReadCloser to populate Req.Body
 
 	WantDump    string
 	WantDumpOut string
@@ -479,7 +479,7 @@ func TestDumpResponse(t *testing.T) {
 	}
 }
 
-// Issue 38352: Check for deadlock on cancelled requests.
+// Issue 38352: Check for deadlock on canceled requests.
 func TestDumpRequestOutIssue38352(t *testing.T) {
 	if testing.Short() {
 		return

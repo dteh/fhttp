@@ -20,6 +20,7 @@ import (
 
 	"github.com/dteh/fhttp/httptrace"
 	"github.com/dteh/fhttp/internal"
+	"github.com/dteh/fhttp/internal/ascii"
 
 	"golang.org/x/net/http/httpguts"
 )
@@ -73,7 +74,7 @@ type transferWriter struct {
 	ByteReadCh   chan readResult // non-nil if probeRequestBody called
 }
 
-func newTransferWriter(r interface{}) (t *transferWriter, err error) {
+func newTransferWriter(r any) (t *transferWriter, err error) {
 	t = &transferWriter{}
 
 	// Extract relevant fields
@@ -196,10 +197,11 @@ func (t *transferWriter) shouldSendChunkedRequestBody() bool {
 // headers before the pipe is fed data), we need to be careful and bound how
 // long we wait for it. This delay will only affect users if all the following
 // are true:
-//   * the request body blocks
-//   * the content length is not set (or set to -1)
-//   * the method doesn't usually have a body (GET, HEAD, DELETE, ...)
-//   * there is no transfer-encoding=chunked already set.
+//   - the request body blocks
+//   - the content length is not set (or set to -1)
+//   - the method doesn't usually have a body (GET, HEAD, DELETE, ...)
+//   - there is no transfer-encoding=chunked already set.
+//
 // In other words, this delay will not normally affect anybody, and there
 // are workarounds if it does.
 func (t *transferWriter) probeRequestBody() {
@@ -212,6 +214,7 @@ func (t *transferWriter) probeRequestBody() {
 			rres.b = buf[0]
 		}
 		t.ByteReadCh <- rres
+		close(t.ByteReadCh)
 	}(t.Body)
 	timer := time.NewTimer(200 * time.Millisecond)
 	select {
@@ -276,7 +279,6 @@ const (
 	ContentLengthDelete = "DELETE_CONTENT_LENGTH"
 )
 
-// addHeaders adds transfer headers to an existing header object
 func (t *transferWriter) addHeaders(hdrs *Header, trace *httptrace.ClientTrace) error {
 	if t.Close && !hasToken(t.Header.get("Connection"), "close") {
 		hdrs.Add("Connection", "close")
@@ -348,7 +350,7 @@ func (t *transferWriter) writeHeader(w io.Writer, trace *httptrace.ClientTrace) 
 		}
 	}
 
-	// Write Content-Length and/or Transfer-Encoding whose Values are a
+	// Write Content-Length and/or Transfer-Encoding whose values are a
 	// function of the sanitized field triple (Body, ContentLength,
 	// TransferEncoding)
 	if t.shouldSendContentLength() {
@@ -377,7 +379,7 @@ func (t *transferWriter) writeHeader(w io.Writer, trace *httptrace.ClientTrace) 
 			k = CanonicalHeaderKey(k)
 			switch k {
 			case "Transfer-Encoding", "Trailer", "Content-Length":
-				return badStringError("invalid Trailer Key", k)
+				return badStringError("invalid Trailer key", k)
 			}
 			keys = append(keys, k)
 		}
@@ -487,8 +489,8 @@ func (t *transferWriter) doBodyCopy(dst io.Writer, src io.Reader) (n int64, err 
 //
 // This function is only intended for use in writeBody.
 func (t *transferWriter) unwrapBody() io.Reader {
-	if reflect.TypeOf(t.Body) == nopCloserType {
-		return reflect.ValueOf(t.Body).Field(0).Interface().(io.Reader)
+	if r, ok := unwrapNopCloser(t.Body); ok {
+		return r
 	}
 	if r, ok := t.Body.(*readTrackingBody); ok {
 		r.didRead = true
@@ -533,6 +535,7 @@ func bodyAllowedForStatus(status int) bool {
 var (
 	suppressedHeaders304    = []string{"Content-Type", "Content-Length", "Transfer-Encoding"}
 	suppressedHeadersNoBody = []string{"Content-Length", "Transfer-Encoding"}
+	excludedHeadersNoBody   = map[string]bool{"Content-Length": true, "Transfer-Encoding": true}
 )
 
 func suppressedHeaders(status int) []string {
@@ -547,7 +550,7 @@ func suppressedHeaders(status int) []string {
 }
 
 // msg is *Request or *Response.
-func readTransfer(msg interface{}, r *bufio.Reader) (err error) {
+func readTransfer(msg any, r *bufio.Reader) (err error) {
 	t := &transferReader{RequestMethod: "GET"}
 
 	// Unify input
@@ -706,7 +709,7 @@ func (t *transferReader) parseTransferEncoding() error {
 	if len(raw) != 1 {
 		return &unsupportedTEError{fmt.Sprintf("too many transfer encodings: %q", raw)}
 	}
-	if strings.ToLower(textproto.TrimString(raw[0])) != "chunked" {
+	if !ascii.EqualFold(textproto.TrimString(raw[0]), "chunked") {
 		return &unsupportedTEError{fmt.Sprintf("unsupported transfer encoding: %q", raw[0])}
 	}
 
@@ -854,7 +857,7 @@ func fixTrailer(header Header, chunked bool) (Header, error) {
 			switch key {
 			case "Transfer-Encoding", "Trailer", "Content-Length":
 				if err == nil {
-					err = badStringError("bad trailer Key", key)
+					err = badStringError("bad trailer key", key)
 					return
 				}
 			}
@@ -875,7 +878,7 @@ func fixTrailer(header Header, chunked bool) (Header, error) {
 // and then reads the trailer if necessary.
 type body struct {
 	src          io.Reader
-	hdr          interface{}   // non-nil (Response or Request) value means read trailer
+	hdr          any           // non-nil (Response or Request) value means read trailer
 	r            *bufio.Reader // underlying wire-format reader for the trailer
 	closing      bool          // is the connection to be closed after reading body?
 	doEarlyClose bool          // whether Close should stop early
@@ -1096,7 +1099,7 @@ func (b *body) registerOnHitEOF(fn func()) {
 	b.onHitEOF = fn
 }
 
-// bodyLocked is a io.Reader reading from a *body when its mutex is
+// bodyLocked is an io.Reader reading from a *body when its mutex is
 // already held.
 type bodyLocked struct {
 	b *body
@@ -1139,10 +1142,28 @@ func (fr finishAsyncByteRead) Read(p []byte) (n int, err error) {
 	if n == 1 {
 		p[0] = rres.b
 	}
+	if err == nil {
+		err = io.EOF
+	}
 	return
 }
 
 var nopCloserType = reflect.TypeOf(io.NopCloser(nil))
+var nopCloserWriterToType = reflect.TypeOf(io.NopCloser(struct {
+	io.Reader
+	io.WriterTo
+}{}))
+
+// unwrapNopCloser return the underlying reader and true if r is a NopCloser
+// else it return false
+func unwrapNopCloser(r io.Reader) (underlyingReader io.Reader, isNopCloser bool) {
+	switch reflect.TypeOf(r) {
+	case nopCloserType, nopCloserWriterToType:
+		return reflect.ValueOf(r).Field(0).Interface().(io.Reader), true
+	default:
+		return nil, false
+	}
+}
 
 // isKnownInMemoryReader reports whether r is a type known to not
 // block on Read. Its caller uses this as an optional optimization to
@@ -1152,8 +1173,8 @@ func isKnownInMemoryReader(r io.Reader) bool {
 	case *bytes.Reader, *bytes.Buffer, *strings.Reader:
 		return true
 	}
-	if reflect.TypeOf(r) == nopCloserType {
-		return isKnownInMemoryReader(reflect.ValueOf(r).Field(0).Interface().(io.Reader))
+	if r, ok := unwrapNopCloser(r); ok {
+		return isKnownInMemoryReader(r)
 	}
 	if r, ok := r.(*readTrackingBody); ok {
 		return isKnownInMemoryReader(r.ReadCloser)

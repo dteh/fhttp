@@ -12,7 +12,7 @@ Get, Head, Post, and PostForm make HTTP (or HTTPS) requests:
 	resp, err := http.Post("http://example.com/upload", "image/jpeg", &buf)
 	...
 	resp, err := http.PostForm("http://example.com/form",
-		url.Values{"Key": {"Value"}, "id": {"123"}})
+		url.Values{"key": {"Value"}, "id": {"123"}})
 
 The client must close the response body when finished with it:
 
@@ -102,6 +102,9 @@ directly and use its ConfigureTransport and/or ConfigureServer
 functions. Manually configuring HTTP/2 via the golang.org/x/net/http2
 package takes precedence over the net/http package's built-in HTTP/2
 support.
+<<<<<<< HEAD
 
+=======
+>>>>>>> golang-http-upstream
 */
 package http

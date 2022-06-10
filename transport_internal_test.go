@@ -10,14 +10,12 @@ import (
 	"bytes"
 	"crypto/tls"
 	"errors"
-	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"strings"
 	"testing"
 
-	"github.com/dteh/fhttp/internal"
+	"github.com/dteh/fhttp/internal/testcert"
 )
 
 // Issue 15446: incorrect wrapping of errors when server closes an idle connection.
@@ -55,8 +53,8 @@ func TestTransportPersistConnReadLoopEOF(t *testing.T) {
 	conn.Close() // simulate the server hanging up on the client
 
 	_, err = pc.roundTrip(treq)
-	if !isTransportReadFromServerError(err) && err != errServerClosedIdle {
-		t.Errorf("roundTrip = %#v, %v; want errServerClosedIdle or transportReadFromServerError", err, err)
+	if !isNothingWrittenError(err) && !isTransportReadFromServerError(err) && err != errServerClosedIdle {
+		t.Errorf("roundTrip = %#v, %v; want errServerClosedIdle, transportReadFromServerError, or nothingWrittenError", err, err)
 	}
 
 	<-pc.closech
@@ -64,6 +62,11 @@ func TestTransportPersistConnReadLoopEOF(t *testing.T) {
 	if !isTransportReadFromServerError(err) && err != errServerClosedIdle {
 		t.Errorf("pc.closed = %#v, %v; want errServerClosedIdle or transportReadFromServerError", err, err)
 	}
+}
+
+func isNothingWrittenError(err error) bool {
+	_, ok := err.(nothingWrittenError)
+	return ok
 }
 
 func isTransportReadFromServerError(err error) bool {
@@ -194,7 +197,7 @@ func (f roundTripFunc) RoundTrip(r *Request) (*Response, error) {
 
 // Issue 25009
 func TestTransportBodyAltRewind(t *testing.T) {
-	cert, err := tls.X509KeyPair(internal.LocalhostCert, internal.LocalhostKey)
+	cert, err := tls.X509KeyPair(testcert.LocalhostCert, testcert.LocalhostKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,22 +264,5 @@ func TestTransportBodyAltRewind(t *testing.T) {
 	_, err = c.Do(req)
 	if err != nil {
 		t.Error(err)
-	}
-}
-
-// Tests that gzipReader doesn't crash on a second Read call following
-// the first Read call's gzip.NewReader returning an error.
-func TestGzipReader_DoubleReadCrash(t *testing.T) {
-	gz := &gzipReader{
-		body: ioutil.NopCloser(strings.NewReader("0123456789")),
-	}
-	var buf [1]byte
-	n, err1 := gz.Read(buf[:])
-	if n != 0 || !strings.Contains(fmt.Sprint(err1), "invalid header") {
-		t.Fatalf("Read = %v, %v; want 0, invalid header", n, err1)
-	}
-	n, err2 := gz.Read(buf[:])
-	if n != 0 || err2 != err1 {
-		t.Fatalf("second Read = %v, %v; want 0, %v", n, err2, err1)
 	}
 }

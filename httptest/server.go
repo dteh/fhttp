@@ -19,7 +19,7 @@ import (
 	"time"
 
 	http "github.com/dteh/fhttp"
-	"github.com/dteh/fhttp/internal"
+	"github.com/dteh/fhttp/internal/testcert"
 )
 
 // A Server is an HTTP server listening on a system-chosen port on the
@@ -77,7 +77,9 @@ func newLocalListener() net.Listener {
 
 // When debugging a particular http server-based test,
 // this flag lets you run
+//
 //	go test -run=BrokenTest -httptest.serve=127.0.0.1:8000
+//
 // to start the broken server so you can interact with it manually.
 // We only register this flag if it looks like the caller knows about it
 // and is trying to use it as we don't want to pollute flags and this
@@ -145,7 +147,7 @@ func (s *Server) StartTLS() {
 	if s.client == nil {
 		s.client = &http.Client{Transport: &http.Transport{}}
 	}
-	cert, err := tls.X509KeyPair(internal.LocalhostCert, internal.LocalhostKey)
+	cert, err := tls.X509KeyPair(testcert.LocalhostCert, testcert.LocalhostKey)
 	if err != nil {
 		panic(fmt.Sprintf("httptest: NewTLSServer: %v", err))
 	}
@@ -317,15 +319,18 @@ func (s *Server) wrap() {
 	s.Config.ConnState = func(c net.Conn, cs http.ConnState) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
+
 		switch cs {
 		case http.StateNew:
-			s.wg.Add(1)
 			if _, exists := s.conns[c]; exists {
 				panic("invalid state transition")
 			}
 			if s.conns == nil {
 				s.conns = make(map[net.Conn]http.ConnState)
 			}
+			// Add c to the set of tracked conns and increment it to the
+			// waitgroup.
+			s.wg.Add(1)
 			s.conns[c] = cs
 			if s.closed {
 				// Probably just a socket-late-binding dial from
@@ -352,7 +357,14 @@ func (s *Server) wrap() {
 				s.closeConn(c)
 			}
 		case http.StateHijacked, http.StateClosed:
-			s.forgetConn(c)
+			// Remove c from the set of tracked conns and decrement it from the
+			// waitgroup, unless it was previously removed.
+			if _, ok := s.conns[c]; ok {
+				delete(s.conns, c)
+				// Keep Close from returning until the user's ConnState hook
+				// (if any) finishes.
+				defer s.wg.Done()
+			}
 		}
 		if oldHook != nil {
 			oldHook(c, cs)
@@ -370,15 +382,5 @@ func (s *Server) closeConnChan(c net.Conn, done chan<- struct{}) {
 	c.Close()
 	if done != nil {
 		done <- struct{}{}
-	}
-}
-
-// forgetConn removes c from the set of tracked conns and decrements it from the
-// waitgroup, unless it was previously removed.
-// s.mu must be held.
-func (s *Server) forgetConn(c net.Conn) {
-	if _, ok := s.conns[c]; ok {
-		delete(s.conns, c)
-		s.wg.Done()
 	}
 }
