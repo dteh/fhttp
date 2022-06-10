@@ -229,7 +229,8 @@ func (h Header) SortedKeyValuesBy(order map[string]int, exclude map[string]bool)
 	kvs = hs.kvs[:0]
 	for k, vv := range h {
 		mutex.RLock()
-		if !exclude[k] {
+		_, valueExists := h[k]
+		if !exclude[k] && valueExists {
 			kvs = append(kvs, HeaderKeyValues{k, vv})
 		}
 		mutex.RUnlock()
@@ -261,7 +262,7 @@ func (h Header) writeSubset(w io.Writer, exclude map[string]bool, trace *httptra
 	if headerOrder, ok := h[HeaderOrderKey]; ok {
 		order := make(map[string]int)
 		for i, v := range headerOrder {
-			order[v] = i
+			order[strings.ToLower(v)] = i
 		}
 		if exclude == nil {
 			exclude = make(map[string]bool)
@@ -346,4 +347,30 @@ func hasToken(v, token string) bool {
 
 func isTokenBoundary(b byte) bool {
 	return b == ' ' || b == ',' || b == '\t'
+}
+
+func (h Header) headerOrderContains(elem string) bool {
+	if _, ok := h[HeaderOrderKey]; !ok {
+		return false
+	}
+	elem = strings.ToLower(elem)
+	for _, key := range h[HeaderOrderKey] {
+		if strings.ToLower(key) == elem {
+			return true
+		}
+	}
+	return false
+}
+
+func (h Header) contains(elem string) bool {
+	elem = strings.ToLower(elem)
+	for headerName := range h {
+		if headerName == HeaderOrderKey || headerName == PHeaderOrderKey {
+			continue
+		}
+		if strings.ToLower(headerName) == elem {
+			return true
+		}
+	}
+	return false
 }

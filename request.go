@@ -618,27 +618,31 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 	}
 
 	// Header lines
-	_, err = fmt.Fprintf(w, "Host: %s\r\n", host)
-	if err != nil {
-		return err
-	}
-	if trace != nil && trace.WroteHeaderField != nil {
-		trace.WroteHeaderField("Host", []string{host})
-	}
-
-	// Use the defaultUserAgent unless the Header contains one, which
-	// may be blank to not send the header.
-	userAgent := defaultUserAgent
-	if r.Header.has("User-Agent") {
-		userAgent = r.Header.Get("User-Agent")
-	}
-	if userAgent != "" {
-		_, err = fmt.Fprintf(w, "User-Agent: %s\r\n", userAgent)
+	if !r.Header.headerOrderContains("Host") {
+		_, err = fmt.Fprintf(w, "Host: %s\r\n", host)
 		if err != nil {
 			return err
 		}
 		if trace != nil && trace.WroteHeaderField != nil {
-			trace.WroteHeaderField("User-Agent", []string{userAgent})
+			trace.WroteHeaderField("Host", []string{host})
+		}
+	}
+
+	// Use the defaultUserAgent unless the Header contains one, which
+	// may be blank to not send the header.
+	if !r.Header.headerOrderContains("User-Agent") {
+		userAgent := defaultUserAgent
+		if r.Header.has("User-Agent") {
+			userAgent = r.Header.Get("User-Agent")
+		}
+		if userAgent != "" {
+			_, err = fmt.Fprintf(w, "User-Agent: %s\r\n", userAgent)
+			if err != nil {
+				return err
+			}
+			if trace != nil && trace.WroteHeaderField != nil {
+				trace.WroteHeaderField("User-Agent", []string{userAgent})
+			}
 		}
 	}
 

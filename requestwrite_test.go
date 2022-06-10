@@ -191,14 +191,14 @@ var reqWriteTests = []reqWriteTest{
 		WantWrite: "POST / HTTP/1.1\r\n" +
 			"Host: example.com\r\n" +
 			"User-Agent: Go-http-client/1.1\r\n" +
-			"Content-Length: 6\r\n" +
+			"Content-Length: 10\r\n" +
 			"\r\n" +
 			"abcdef",
 
 		WantProxy: "POST http://example.com/ HTTP/1.1\r\n" +
 			"Host: example.com\r\n" +
 			"User-Agent: Go-http-client/1.1\r\n" +
-			"Content-Length: 6\r\n" +
+			"Content-Length: 10\r\n" +
 			"\r\n" +
 			"abcdef",
 	},
@@ -611,8 +611,14 @@ var reqWriteTests = []reqWriteTest{
 	27: { // Custom Content-Length header disregarding the Body
 		Req: Request{
 			Method: "POST",
-			URL:    mustParseURL("/"),
-			Header: Header{"Content-Length": {"100"}},
+			URL:    mustParseURL("http://www.google.com/"),
+			Header: Header{"Content-Length": {"100"},
+				HeaderOrderKey: {
+					"Content-Length",
+					// "Host",
+					// "User-Agent",
+				},
+			},
 		},
 		WantWrite: "POST / HTTP/1.1\r\n" +
 			"Content-Length: 100\r\n" +
@@ -627,7 +633,7 @@ var reqWriteTests = []reqWriteTest{
 	28: { // POST with body but with no content-length header
 		Req: Request{
 			Method: "POST",
-			URL:    mustParseURL("https://www.googl.com/"),
+			URL:    mustParseURL("https://www.google.com/"),
 			Header: Header{"Content-Length": {ContentLengthDelete}},
 		},
 		Body: []byte("Hello World"),
