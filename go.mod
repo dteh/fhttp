@@ -3,7 +3,7 @@ module github.com/dteh/fhttp
 go 1.18
 
 require (
-	github.com/google/brotli/go/cbrotli v0.0.0-20220512075048-9801a2c5d6c6
+	github.com/google/brotli v1.0.7
 	golang.org/x/net v0.0.0-20220607020251-c690dde0001d
 	golang.org/x/term v0.0.0-20220526004731-065cf7ba2467
 )
