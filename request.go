@@ -619,6 +619,11 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 
 	// Header lines
 	if !r.Header.headerOrderContains("Host") {
+		// If headers contain a 'Host' field, use that instead
+		if r.Header.contains("Host") {
+			host = r.Header.get("Host")
+			delete(r.Header, "Host")
+		}
 		_, err = fmt.Fprintf(w, "Host: %s\r\n", host)
 		if err != nil {
 			return err
