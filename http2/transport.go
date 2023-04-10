@@ -31,6 +31,7 @@ import (
 
 	http "github.com/dteh/fhttp"
 	"github.com/dteh/fhttp/httptrace"
+	"github.com/google/brotli/go/cbrotli"
 
 	"github.com/dteh/fhttp/http2/hpack"
 	"golang.org/x/net/http/httpguts"
@@ -2423,11 +2424,16 @@ func (rl *clientConnReadLoop) handleResponse(cs *clientStream, f *MetaHeadersFra
 	cs.bytesRemain = res.ContentLength
 	res.Body = transportResponseBody{cs}
 
-	if cs.requestedGzip && asciiEqualFold(res.Header.Get("Content-Encoding"), "gzip") {
+	if cs.requestedGzip && (asciiEqualFold(res.Header.Get("Content-Encoding"), "gzip") || asciiEqualFold(res.Header.Get("Content-Encoding"), "br")) {
+		switch strings.ToLower(res.Header.Get("Content-Encoding")) {
+		case "gzip":
+			res.Body = &gzipReader{body: res.Body}
+		case "br":
+			res.Body = &brReader{body: res.Body}
+		}
 		res.Header.Del("Content-Encoding")
 		res.Header.Del("Content-Length")
 		res.ContentLength = -1
-		res.Body = &gzipReader{body: res.Body}
 		res.Uncompressed = true
 	}
 	return res, nil
@@ -3025,6 +3031,34 @@ func (gz *gzipReader) Read(p []byte) (n int, err error) {
 
 func (gz *gzipReader) Close() error {
 	return gz.body.Close()
+}
+
+type brReader struct {
+	_    incomparable
+	body io.ReadCloser
+	zr   *cbrotli.Reader
+	zerr error
+}
+
+func (br *brReader) Read(p []byte) (n int, err error) {
+	if br.zerr != nil {
+		return 0, br.zerr
+	}
+	if br.zr == nil {
+		br.zr = cbrotli.NewReader(br.body)
+	}
+	return br.zr.Read(p)
+}
+
+func (br *brReader) Close() error {
+	return br.body.Close()
+}
+
+type zlibDeflateReader struct {
+	_    incomparable
+	body io.ReadCloser
+	zr   io.ReadCloser
+	err  error
 }
 
 type errorReader struct{ err error }
