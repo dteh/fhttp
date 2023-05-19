@@ -31,7 +31,9 @@ import (
 
 	http "github.com/dteh/fhttp"
 	"github.com/dteh/fhttp/httptrace"
-	"github.com/google/brotli/go/cbrotli"
+
+	cbrotli "github.com/andybalholm/brotli"
+	// "github.com/google/brotli/go/cbrotli"
 
 	"github.com/dteh/fhttp/http2/hpack"
 	"golang.org/x/net/http/httpguts"

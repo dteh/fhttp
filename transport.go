@@ -33,7 +33,8 @@ import (
 
 	"github.com/dteh/fhttp/internal/godebug"
 
-	cbrotli "github.com/google/brotli/go/cbrotli"
+	// cbrotli "github.com/google/brotli/go/cbrotli" - google implementation; memory leak?
+	cbrotli "github.com/andybalholm/brotli"
 
 	"github.com/dteh/fhttp/httptrace"
 
